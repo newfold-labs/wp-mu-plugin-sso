@@ -526,9 +526,17 @@ if( ! function_exists( 'sso_fail' ) ){
 }
 
 if( ! function_exists( 'sso_get_attempt_id' ) ){
+    /**
+     * Transient key for this client's failed-attempt count.
+     *
+     * Hashed because esc_url() returns an empty string for IPv6 addresses,
+     * which made every IPv6 client share one counter.
+     *
+     * @return string
+     */
     function sso_get_attempt_id(){
-        $ip = isset( $_SERVER['REMOTE_ADDR'] ) ? $_SERVER['REMOTE_ADDR'] : '';
-        return 'sso' . esc_url( $ip );
+        $ip = isset( $_SERVER['REMOTE_ADDR'] ) ? (string) $_SERVER['REMOTE_ADDR'] : '';
+        return 'sso_attempts_' . md5( $ip );
     }
 }
 
