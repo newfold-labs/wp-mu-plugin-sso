@@ -7,6 +7,14 @@
  * License URI: http://www.gnu.org/licenses/gpl-2.0.html
  */
 
+if ( ! defined( 'SSO_REDIRECT_GUARD_KEY' ) ) {
+    define( 'SSO_REDIRECT_GUARD_KEY', 'newfold_sso_pending_redirect_' );
+}
+
+if ( ! defined( 'SSO_REDIRECT_GUARD_TTL' ) ) {
+    define( 'SSO_REDIRECT_GUARD_TTL', 120 );
+}
+
 if( ! function_exists( 'sso_check' ) ){
     function sso_check(){
         if ( ! isset( $_GET['salt'] ) || ! isset( $_GET['nonce'] ) ){
@@ -49,9 +57,22 @@ if( ! function_exists( 'sso_check' ) ){
             if ( is_a( $user, 'WP_User' ) ){
                 wp_set_current_user( $user->ID, $user->user_login );
                 wp_set_auth_cookie( $user->ID );
+
+                $redirect = wp_validate_redirect( admin_url( $bounce ), admin_url() );
+
+                // Pin before wp_login so an onboarding plugin cannot hijack
+                // this request, and persist a short-lived transient so the
+                // landing admin_init can re-pin the next request.
+                sso_pin_redirect( $redirect );
+                set_transient(
+                    SSO_REDIRECT_GUARD_KEY . $user->ID,
+                    $redirect,
+                    sso_get_redirect_guard_ttl()
+                );
+
                 do_action( 'wp_login', $user->user_login, $user );
                 delete_transient( 'sso_token' );
-                wp_safe_redirect( admin_url( $bounce ) );
+                wp_safe_redirect( $redirect );
             }else{
                 sso_req_login();
             }
@@ -62,6 +83,85 @@ if( ! function_exists( 'sso_check' ) ){
         die();
     }
 }
+
+if( ! function_exists( 'sso_get_redirect_guard_ttl' ) ){
+    function sso_get_redirect_guard_ttl(){
+        return max( 30, (int) apply_filters( 'newfold_sso_redirect_guard_ttl', SSO_REDIRECT_GUARD_TTL ) );
+    }
+}
+
+if( ! function_exists( 'sso_pin_redirect' ) ){
+    function sso_pin_redirect( $url ){
+        if ( ! empty( $GLOBALS['sso_redirect_pin_callback'] ) ){
+            remove_filter( 'wp_redirect', $GLOBALS['sso_redirect_pin_callback'], PHP_INT_MAX );
+            $GLOBALS['sso_redirect_pin_callback'] = null;
+        }
+
+        $GLOBALS['sso_redirect_guard_hijacked'] = false;
+        $GLOBALS['sso_redirect_pin_callback']   = static function ( $location, $status = 302 ) use ( $url ) {
+            unset( $status );
+            if ( (string) $location !== (string) $url ){
+                $GLOBALS['sso_redirect_guard_hijacked'] = true;
+            }
+
+            return $url;
+        };
+
+        add_filter( 'wp_redirect', $GLOBALS['sso_redirect_pin_callback'], PHP_INT_MAX, 2 );
+    }
+}
+
+if( ! function_exists( 'sso_consume_redirect_guard_if_clean' ) ){
+    function sso_consume_redirect_guard_if_clean(){
+        $key      = isset( $GLOBALS['sso_redirect_guard_key'] ) ? $GLOBALS['sso_redirect_guard_key'] : null;
+        $hijacked = ! empty( $GLOBALS['sso_redirect_guard_hijacked'] );
+        if ( $key && ! $hijacked ){
+            delete_transient( $key );
+            $GLOBALS['sso_redirect_guard_key'] = null;
+        }
+    }
+}
+
+if( ! function_exists( 'sso_guard_pending_redirect' ) ){
+    function sso_guard_pending_redirect(){
+        $user_id = get_current_user_id();
+        if ( ! $user_id ){
+            return;
+        }
+
+        $key      = SSO_REDIRECT_GUARD_KEY . $user_id;
+        $redirect = get_transient( $key );
+        if ( ! $redirect ){
+            return;
+        }
+
+        $redirect = wp_validate_redirect( $redirect, false );
+        if ( ! $redirect ){
+            delete_transient( $key );
+            return;
+        }
+
+        $GLOBALS['sso_redirect_guard_key'] = $key;
+        sso_pin_redirect( $redirect );
+
+        add_action( 'shutdown', 'sso_consume_redirect_guard_if_clean', PHP_INT_MAX );
+    }
+}
+
+if( ! function_exists( 'sso_maybe_run_early' ) ){
+    function sso_maybe_run_early(){
+        if ( ! isset( $_GET['action'] ) || 'sso-check' !== $_GET['action'] ){
+            return;
+        }
+        if ( ! function_exists( 'wp_set_auth_cookie' ) ){
+            require_once ABSPATH . WPINC . '/pluggable.php';
+        }
+        sso_check();
+    }
+}
+
+add_action( 'muplugins_loaded', 'sso_maybe_run_early', 0 );
+add_action( 'admin_init', 'sso_guard_pending_redirect', PHP_INT_MIN );
 add_action( 'wp_ajax_nopriv_sso-check', 'sso_check' );
 add_action( 'wp_ajax_sso-check', 'sso_check' );
 
